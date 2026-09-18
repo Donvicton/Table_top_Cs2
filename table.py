@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+from sqlalchemy import text  # IMPORTAÇÃO ADICIONADA AQUI
 
 try:
     import imageio.v3 as iio
@@ -478,10 +479,10 @@ with abas[0]:
             try:
                 with conn.session as s:
                     s.execute(
-                        """
+                        text("""
                         INSERT INTO jogadas (nome_jogada, mapa, lado, tipo_round, markers, desenhos, desenhos_livres)
                         VALUES (:nome, :mapa, :lado, :tipo_round, :markers::jsonb, :desenhos::jsonb, :desenhos_livres::jsonb)
-                        """,
+                        """),
                         {
                             "nome": nome_jogada,
                             "mapa": mapa_selecionado,
@@ -493,7 +494,7 @@ with abas[0]:
                         }
                     )
                     s.commit()
-                st.success(f"✅ Jogada '{nome_jogada}' salva com sucesso no banco de dados da equipe!")
+                st.success(f"✅ Jogada '{nome_jogada}' salva com sucesso no banco de dados da equipa!")
             except Exception as ex:
                 st.error(f"Erro ao salvar no banco de dados: {ex}")
 
@@ -501,7 +502,7 @@ with abas[0]:
 # MINHAS JOGADAS — VIA BANCO SQL (SUPABASE)
 # ============================================================================
 with abas[1]:
-    st.subheader("📁 Táticas da Equipe (Nuvem / Supabase)")
+    st.subheader("📁 Táticas da Equipa (Nuvem / Supabase)")
 
     if conn is None:
         st.warning("⚠️ Conexão com o banco de dados não configurada. Configure os Secrets no Streamlit Cloud.")
@@ -548,7 +549,7 @@ with abas[1]:
                                         if st.button("🗑️ Excluir da nuvem", key=f"del_sql_{jogada_id}", use_container_width=True):
                                             try:
                                              with conn.session as s:
-                                                 s.execute("DELETE FROM jogadas WHERE id = :id", {"id": jogada_id})
+                                                 s.execute(text("DELETE FROM jogadas WHERE id = :id"), {"id": jogada_id})
                                                  s.commit()
                                              st.success("Jogada excluída com sucesso!")
                                              st.rerun()
