@@ -499,10 +499,10 @@ with abas[0]:
                 st.error(f"Erro ao salvar no banco de dados: {ex}")
 
 # ============================================================================
-# MINHAS JOGADAS — VIA BANCO SQL (SUPABASE)
+# MINHAS JOGADAS — VIA BANCO SQL (POSTGRESQL)
 # ============================================================================
 with abas[1]:
-    st.subheader("📁 Táticas da Equipa (Nuvem / Supabase)")
+    st.subheader("📁 Táticas da Equipa (Nuvem)")
 
     if conn is None:
         st.warning("⚠️ Conexão com o banco de dados não configurada. Configure os Secrets no Streamlit Cloud.")
@@ -532,28 +532,58 @@ with abas[1]:
                                 lado_j = row["lado"]
                                 
                                 with st.expander(f"{nome_j}  ·  Lado {lado_j}  ·  ID: {jogada_id}"):
+                                    m_data = row["markers"]
+                                    d_data = row["desenhos"]
+                                    dl_data = row["desenhos_livres"]
+                                    
+                                    markers_preview = json.loads(m_data) if isinstance(m_data, str) else m_data
+                                    desenhos_preview = json.loads(d_data) if isinstance(d_data, str) else (d_data if d_data else [])
+                                    dl_preview = json.loads(dl_data) if isinstance(dl_data, str) else (dl_data if dl_data else [])
+                                    
+                                    caminho_mapa_preview = MAPS_DIR / row["mapa"]
+                                    if caminho_mapa_preview.exists():
+                                        try:
+                                            # Reconstrói a imagem da tática dinamicamente
+                                            fundo_preview = get_fundo(str(caminho_mapa_preview), modo_esboco)
+                                            img_preview = desenhar_marcadores(fundo_preview, markers_preview, None)
+                                            img_preview = desenhar_setas_salvas(img_preview, desenhos_preview)
+                                            
+                                            st.image(img_preview, use_container_width=True)
+                                            
+                                            # Permite baixar o PNG gerado
+                                            import io
+                                            buf = io.BytesIO()
+                                            img_preview.save(buf, format="PNG")
+                                            st.download_button(
+                                                "⬇️ Baixar PNG",
+                                                data=buf.getvalue(),
+                                                file_name=f"{nome_j}_{tipo}.png",
+                                                mime="image/png",
+                                                key=f"dl_sql_{jogada_id}",
+                                                use_container_width=True
+                                            )
+                                        except Exception as e:
+                                            st.error(f"Erro ao gerar pré-visualização: {e}")
+                                    else:
+                                        st.warning("Mapa não encontrado para gerar pré-visualização.")
+
                                     c1, c2 = st.columns(2)
                                     with c1:
                                         if st.button("🔄 Carregar pra editar", key=f"load_sql_{jogada_id}", use_container_width=True):
-                                            # Trata caso venha como string ou json direto do postgres
-                                            m_data = row["markers"]
-                                            d_data = row["desenhos"]
-                                            dl_data = row["desenhos_livres"]
-                                            
-                                            st.session_state.markers = json.loads(m_data) if isinstance(m_data, str) else m_data
-                                            st.session_state.desenhos = json.loads(d_data) if isinstance(d_data, str) else (d_data if d_data else [])
-                                            st.session_state.desenhos_livres = json.loads(dl_data) if isinstance(dl_data, str) else (dl_data if dl_data else [])
+                                            st.session_state.markers = markers_preview
+                                            st.session_state.desenhos = desenhos_preview
+                                            st.session_state.desenhos_livres = dl_preview
                                             st.session_state.marcador_segurando = None
                                             st.success("Jogada carregada! Vá para a aba Prancheta.")
                                     with c2:
                                         if st.button("🗑️ Excluir da nuvem", key=f"del_sql_{jogada_id}", use_container_width=True):
                                             try:
-                                             with conn.session as s:
-                                                 s.execute(text("DELETE FROM jogadas WHERE id = :id"), {"id": jogada_id})
-                                                 s.commit()
-                                             st.success("Jogada excluída com sucesso!")
-                                             st.rerun()
+                                                with conn.session as s:
+                                                    s.execute(text("DELETE FROM jogadas WHERE id = :id"), {"id": jogada_id})
+                                                    s.commit()
+                                                st.success("Jogada excluída com sucesso!")
+                                                st.rerun()
                                             except Exception as exc:
-                                             st.error(f"Erro ao excluir: {exc}")
+                                                st.error(f"Erro ao excluir: {exc}")
         except Exception as e:
             st.error(f"Erro ao consultar o banco de dados: {e}. Verifique se a tabela 'jogadas' foi criada corretamente.")
