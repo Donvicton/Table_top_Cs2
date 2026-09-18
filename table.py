@@ -1,27 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Prancheta Tática CS2 — versão 2, reconstruída em cima de streamlit-image-
-coordinates em vez do streamlit-drawable-canvas (que tinha o problema de
-versão que a gente já resolveu no app antigo, mas que no toque do celular
-continua meio travado por natureza).
-
-Modelo de interação (tipo prancheta de futebol digital):
-- Marcadores CT 1-5 e TR 1-5 são fixos e numerados — cada um só existe uma
-  vez no tabuleiro; tocar de novo com ele selecionado MOVE ele.
-- Utilitários (Smoke/Flash/HE/Molotov) podem ter várias unidades.
-- Três modos: Posicionar / Mover / Apagar (ver barra lateral).
-
-Testado (sintaticamente e com dados sintéticos) neste ambiente; a única
-coisa que só dá pra confirmar de verdade no seu celular é a sensação do
-toque em si.
-
-Como rodar:
-    pip install -r requirements_v2.txt
-    streamlit run prancheta.py
+Prancheta Tática CS2 — versão 2 com Banco de Dados PostgreSQL (Supabase)
 """
 from __future__ import annotations
 
-from streamlit_drawable_canvas import st_canvas
 import json
 import math
 import uuid
@@ -35,9 +17,7 @@ try:
 except ImportError:
     IMAGEIO_OK = False
 
-
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
 import streamlit.components.v1 as components
 from streamlit_image_coordinates import streamlit_image_coordinates
 
@@ -50,9 +30,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 MAPS_DIR = BASE_DIR / "maps"
-JOGADAS_DIR = BASE_DIR / "minhas_jogadas"
-for pasta in [MAPS_DIR, JOGADAS_DIR / "CT", JOGADAS_DIR / "TR"]:
-    pasta.mkdir(parents=True, exist_ok=True)
+MAPS_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title="CS2 Táticas", layout="wide", initial_sidebar_state="collapsed")
 
@@ -82,7 +60,15 @@ components.html(
 )
 
 # ============================================================================
-# TOKENS — predefinidos, numerados, estilo prancheta de futebol.
+# CONEXÃO COM O BANCO DE DADOS (SUPABASE / POSTGRES)
+# ============================================================================
+try:
+    conn = st.connection("postgres", type="sql")
+except Exception:
+    conn = None
+
+# ============================================================================
+# TOKENS
 # ============================================================================
 TOKENS: dict[str, dict] = {}
 for i in range(1, 6):
@@ -96,7 +82,7 @@ TOKENS["HE"] = {"grupo": "UTIL", "rotulo": "H", "singleton": False, "cor": (110,
 TOKENS["Molotov"] = {"grupo": "UTIL", "rotulo": "M", "singleton": False, "cor": (230, 90, 40), "texto": (255, 255, 255)}
 
 RAIO_MARCADOR = 16
-LIMIAR_PROXIMIDADE_FRAC = 0.045  # % da menor dimensão da imagem pra "achar" um marcador com o toque
+LIMIAR_PROXIMIDADE_FRAC = 0.045
 
 ROUND_TYPES = ["Eco", "Forçado", "Comprado"]
 ROUND_TYPE_SLUGS = {"Eco": "eco", "Forçado": "forcado", "Comprado": "comprado"}
@@ -105,7 +91,7 @@ ROUND_TYPE_SLUGS = {"Eco": "eco", "Forçado": "forcado", "Comprado": "comprado"}
 def font(size: int):
     try:
         return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ImageFont.load_default()
 
 
@@ -113,7 +99,7 @@ def font(size: int):
 # ESTADO
 # ============================================================================
 if "markers" not in st.session_state:
-    st.session_state.markers = []  # cada item: {uid, tipo, x, y} (x,y em pixels da imagem ORIGINAL)
+    st.session_state.markers = []
 if "modo" not in st.session_state:
     st.session_state.modo = "Posicionar"
 if "marcador_segurando" not in st.session_state:
@@ -121,19 +107,15 @@ if "marcador_segurando" not in st.session_state:
 if "ultimo_click_ts" not in st.session_state:
     st.session_state.ultimo_click_ts = None
 if "fundo_cache" not in st.session_state:
-    st.session_state.fundo_cache = {}  # key -> imagem PIL (mapa + filtro, sem marcadores)
+    st.session_state.fundo_cache = {}
 if "desenhos" not in st.session_state:
     st.session_state.desenhos = []
-
 if "cor_pincel" not in st.session_state:
     st.session_state.cor_pincel = "#FF0000"
-
 if "tamanho_pincel" not in st.session_state:
     st.session_state.tamanho_pincel = 4
-
 if "ponto_seta" not in st.session_state:
     st.session_state.ponto_seta = None
-
 if "desenhos_livres" not in st.session_state:
     st.session_state.desenhos_livres = []
 
@@ -151,33 +133,23 @@ def aplicar_filtro_esboco(imagem_pil: Image.Image) -> Image.Image:
     return Image.fromarray(cv2.cvtColor(esboco, cv2.COLOR_GRAY2RGB))
 
 
-def get_fundo(caminho_mapa: Path, modo_esboco: bool) -> Image.Image:
-    key = f"{caminho_mapa}_{modo_esboco}"
+@st.cache_data
+def get_fundo(caminho_mapa_str: str, modo_esboco: bool) -> Image.Image:
+    caminho_mapa = Path(caminho_mapa_str)
+    extensao = caminho_mapa.suffix.lower()
 
-    if key not in st.session_state.fundo_cache:
-        extensao = caminho_mapa.suffix.lower()
+    if extensao == ".dds":
+        if not IMAGEIO_OK:
+            raise RuntimeError("Para abrir mapas DDS, instale o pacote imageio")
+        img_array = iio.imread(caminho_mapa)
+        img = Image.fromarray(img_array).convert("RGB")
+    else:
+        img = Image.open(caminho_mapa).convert("RGB")
 
-        if extensao == ".dds":
-            if not IMAGEIO_OK:
-                raise RuntimeError(
-                    "Para abrir mapas DDS, instale o pacote imageio com: "
-                    "pip install imageio"
-                )
+    if modo_esboco:
+        img = aplicar_filtro_esboco(img)
 
-            # Lê o DDS e transforma em imagem PIL
-            img_array = iio.imread(caminho_mapa)
-            img = Image.fromarray(img_array).convert("RGB")
-
-        else:
-            img = Image.open(caminho_mapa).convert("RGB")
-
-        if modo_esboco:
-            img = aplicar_filtro_esboco(img)
-
-        # Guarda somente o último mapa processado
-        st.session_state.fundo_cache = {key: img}
-
-    return st.session_state.fundo_cache[key]
+    return img
 
 
 def desenhar_marcadores(fundo: Image.Image, markers: list[dict], segurando_uid: str | None) -> Image.Image:
@@ -222,9 +194,6 @@ def colocar_ou_mover(tipo: str, x: float, y: float):
     else:
         st.session_state.markers.append({"uid": str(uuid.uuid4()), "tipo": tipo, "x": x, "y": y})
 
-# ============================================================================
-# DESENHO TÁTICO
-# ============================================================================
 
 def desenhar_seta(
     imagem: Image.Image,
@@ -235,53 +204,20 @@ def desenhar_seta(
     cor: str,
     largura: int,
 ) -> Image.Image:
-    """
-    Desenha uma seta sobre a imagem.
-    x1,y1 = início
-    x2,y2 = fim
-    """
-
     img = imagem.copy().convert("RGBA")
     draw = ImageDraw.Draw(img)
-
-    # Linha principal
-    draw.line(
-        [(x1, y1), (x2, y2)],
-        fill=cor,
-        width=largura,
-    )
-
-    # Direção da seta
+    draw.line([(x1, y1), (x2, y2)], fill=cor, width=largura)
     angulo = math.atan2(y2 - y1, x2 - x1)
-
     tamanho_ponta = max(10, largura * 3)
-
     angulo1 = angulo + math.radians(150)
     angulo2 = angulo - math.radians(150)
-
-    p1 = (
-        x2 + tamanho_ponta * math.cos(angulo1),
-        y2 + tamanho_ponta * math.sin(angulo1),
-    )
-
-    p2 = (
-        x2 + tamanho_ponta * math.cos(angulo2),
-        y2 + tamanho_ponta * math.sin(angulo2),
-    )
-
-    draw.polygon(
-        [(x2, y2), p1, p2],
-        fill=cor,
-    )
-
+    p1 = (x2 + tamanho_ponta * math.cos(angulo1), y2 + tamanho_ponta * math.sin(angulo1))
+    p2 = (x2 + tamanho_ponta * math.cos(angulo2), y2 + tamanho_ponta * math.sin(angulo2))
+    draw.polygon([(x2, y2), p1, p2], fill=cor)
     return img
 
 
 def adicionar_seta(x1: float, y1: float, x2: float, y2: float):
-    """
-    Guarda uma seta no estado da aplicação.
-    """
-
     st.session_state.desenhos.append({
         "tipo": "seta",
         "x1": x1,
@@ -293,20 +229,11 @@ def adicionar_seta(x1: float, y1: float, x2: float, y2: float):
     })
 
 
-def desenhar_setas_salvas(
-    imagem: Image.Image,
-    desenhos: list[dict],
-) -> Image.Image:
-    """
-    Desenha todas as setas salvas sobre o mapa.
-    """
-
+def desenhar_setas_salvas(imagem: Image.Image, desenhos: list[dict]) -> Image.Image:
     resultado = imagem.copy()
-
     for desenho in desenhos:
         if desenho.get("tipo") != "seta":
             continue
-
         resultado = desenhar_seta(
             resultado,
             desenho["x1"],
@@ -316,8 +243,9 @@ def desenhar_setas_salvas(
             desenho.get("cor", "#FF0000"),
             desenho.get("largura", 4),
         )
-
     return resultado
+
+
 # ============================================================================
 # BARRA LATERAL
 # ============================================================================
@@ -328,10 +256,10 @@ with st.sidebar:
 
     with st.expander("🗺️ Adicionar mapa novo", expanded=not mapas_disponiveis):
         novo_mapa = st.file_uploader(
-    "Imagem do mapa (.png/.jpg/.jpeg/.dds)",
-    type=["png", "jpg", "jpeg", "dds"],
-    key="upload_mapa"
-)
+            "Imagem do mapa (.png/.jpg/.jpeg/.dds)",
+            type=["png", "jpg", "jpeg", "dds"],
+            key="upload_mapa"
+        )
         if novo_mapa is not None:
             destino = MAPS_DIR / novo_mapa.name
             destino.write_bytes(novo_mapa.getbuffer())
@@ -392,18 +320,13 @@ with st.sidebar:
             value=st.session_state.cor_pincel,
             key="color_picker_desenho",
         )
-
         st.session_state.tamanho_pincel = st.slider(
             "📏 Espessura",
-            min_value=1,
-            max_value=20,
+            min_value=1, max_value=20,
             value=st.session_state.tamanho_pincel,
-            step=1,
-            key="slider_tamanho_desenho",
+            step=1, key="slider_tamanho_desenho",
         )
-
         st.caption("Desenhe livremente sobre o mapa.")
-
         if st.button("🧹 Limpar desenhos", use_container_width=True):
             st.session_state.desenhos = []
             st.rerun()
@@ -413,30 +336,21 @@ with st.sidebar:
             value=st.session_state.cor_pincel,
             key="color_picker_seta",
         )
-
         st.session_state.tamanho_pincel = st.slider(
             "📏 Espessura da seta",
-            min_value=1,
-            max_value=20,
+            min_value=1, max_value=20,
             value=st.session_state.tamanho_pincel,
-            step=1,
-            key="slider_tamanho_seta",
+            step=1, key="slider_tamanho_seta",
         )
-
         if st.session_state.ponto_seta is None:
             st.caption("Toque no ponto inicial da seta.")
         else:
             st.info("Agora toque no ponto final da seta.")
-
         if st.button("↩️ Cancelar seta", use_container_width=True):
             st.session_state.ponto_seta = None
             st.rerun()
-
         if st.button("🧹 Limpar setas", use_container_width=True):
-            st.session_state.desenhos = [
-                d for d in st.session_state.desenhos
-                if d.get("tipo") != "seta"
-            ]
+            st.session_state.desenhos = [d for d in st.session_state.desenhos if d.get("tipo") != "seta"]
             st.session_state.ponto_seta = None
             st.rerun()
 
@@ -445,6 +359,7 @@ with st.sidebar:
     with col_a:
         if st.button("🗑️ Limpar tudo", use_container_width=True):
             st.session_state.markers = []
+            st.session_state.desenhos = []
             st.session_state.marcador_segurando = None
             st.rerun()
     with col_b:
@@ -458,73 +373,49 @@ abas = st.tabs(["✏️ Prancheta", "📁 Minhas Jogadas"])
 with abas[0]:
     caminho_mapa = MAPS_DIR / mapa_selecionado
     try:
-        fundo = get_fundo(caminho_mapa, modo_esboco)
-    except Exception as e:  # noqa: BLE001
+        fundo = get_fundo(str(caminho_mapa), modo_esboco)
+    except Exception as e:
         st.error(f"Erro ao abrir {mapa_selecionado}: {e}")
         st.stop()
 
-    # ============================================================================
-    # IMAGEM DO TABULEIRO
-    # ============================================================================
     imagem_com_marcadores = desenhar_marcadores(
         fundo,
         st.session_state.markers,
         st.session_state.marcador_segurando,
     )
-    # Desenha as setas salvas por cima dos marcadores
     imagem_com_marcadores = desenhar_setas_salvas(
         imagem_com_marcadores,
         st.session_state.desenhos,
     )
 
-    # ============================================================================
-    # MODO DESENHAR
-    # ============================================================================
     if st.session_state.modo == "Desenhar":
-
-        # Calcula o tamanho mantendo a proporção original
         proporcao = imagem_com_marcadores.height / imagem_com_marcadores.width
-
         altura_canvas = int(tamanho_tela * proporcao)
 
-        canvas_result = st_canvas(
-        fill_color="rgba(0, 0, 0, 0)",
-        stroke_width=st.session_state.tamanho_pincel,
-        stroke_color=st.session_state.cor_pincel,
-        background_image=imagem_com_marcadores,
-        update_streamlit=True,
-        height=altura_canvas,
-        width=tamanho_tela,
-        drawing_mode="freedraw",
-        key=f"canvas_desenho_{mapa_selecionado}",
-    )
+        canvas_result = st.empty()
+        # Nota: se usar o st_canvas, certifique-se de importar st_canvas
+        from streamlit_drawable_canvas import st_canvas
+        canvas_res = st_canvas(
+            fill_color="rgba(0, 0, 0, 0)",
+            stroke_width=st.session_state.tamanho_pincel,
+            stroke_color=st.session_state.cor_pincel,
+            background_image=imagem_com_marcadores,
+            update_streamlit=True,
+            height=altura_canvas,
+            width=tamanho_tela,
+            drawing_mode="freedraw",
+            key=f"canvas_desenho_{mapa_selecionado}",
+        )
 
-        # Guarda os desenhos feitos pelo usuário
-        if canvas_result.json_data is not None:
-
-            objetos = canvas_result.json_data.get("objects", [])
-
+        if canvas_res.json_data is not None:
+            objetos = canvas_res.json_data.get("objects", [])
             desenhos_livres = []
-
             for objeto in objetos:
-
                 if objeto.get("type") != "path":
                     continue
-
-                desenhos_livres.append({
-                    "tipo": "livre",
-                    "objeto": objeto,
-                })
-
-            # Guarda apenas os desenhos livres.
-            # As setas continuam separadas.
+                desenhos_livres.append({"tipo": "livre", "objeto": objeto})
             st.session_state.desenhos_livres = desenhos_livres
-
-    # ============================================================================
-    # OUTROS MODOS — MAPA NORMAL
-    # ============================================================================
     else:
-
         resultado = streamlit_image_coordinates(
             imagem_com_marcadores,
             width=tamanho_tela,
@@ -534,7 +425,6 @@ with abas[0]:
         if resultado is not None and resultado.get("unix_time") != st.session_state.ultimo_click_ts:
             st.session_state.ultimo_click_ts = resultado.get("unix_time")
 
-            # converte do espaço de pixels EXIBIDO pro espaço da imagem ORIGINAL
             escala_x = fundo.width / resultado["width"]
             escala_y = fundo.height / resultado["height"]
             x_real = resultado["x"] * escala_x
@@ -571,117 +461,98 @@ with abas[0]:
                 st.rerun()
 
             elif st.session_state.modo == "Seta":
-
                 if st.session_state.ponto_seta is None:
-
-                    # Primeiro toque = início da seta
-                    st.session_state.ponto_seta = (
-                        x_real,
-                        y_real,
-                    )
-
+                    st.session_state.ponto_seta = (x_real, y_real)
                     st.toast("📍 Ponto inicial definido.")
-
                 else:
-
-                    # Segundo toque = final da seta
                     x1, y1 = st.session_state.ponto_seta
-
-                    adicionar_seta(
-                        x1,
-                        y1,
-                        x_real,
-                        y_real,
-                    )
-
+                    adicionar_seta(x1, y1, x_real, y_real)
                     st.session_state.ponto_seta = None
-
                     st.toast("➡️ Seta criada.")
-
                 st.rerun()
 
     if salvar_clicado:
-        timestamp_str = __import__("datetime").datetime.now().strftime("%d%m%Y_%H%M%S")
-        nome_base = f"{nome_jogada.replace(' ', '_')}_{timestamp_str}"
-        mapa_stem = Path(mapa_selecionado).stem
-        slug_tipo = ROUND_TYPE_SLUGS[tipo_round]
-        pasta_destino = JOGADAS_DIR / mapa_stem / slug_tipo
-        pasta_destino.mkdir(parents=True, exist_ok=True)
-
-        (pasta_destino / f"{nome_base}.json").write_text(
-            json.dumps({
-                "mapa": mapa_selecionado,
-                "lado": lado,
-                "tipo_round": tipo_round,
-                "markers": st.session_state.markers,
-                "desenhos": st.session_state.desenhos,
-                "desenhos_livres": st.session_state.get("desenhos_livres", []),
-            }, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        imagem_com_marcadores.save(pasta_destino / f"{nome_base}.png", "PNG")
-        st.success(
-            f"✅ Jogada salva em **{mapa_stem} → {tipo_round}** "
-            "(editável depois — carrega de novo pra mexer)."
-        )
+        if conn is None:
+            st.error("Conexão com o banco de dados PostgreSQL não foi configurada nos secrets do Streamlit.")
+        else:
+            try:
+                with conn.session as s:
+                    s.execute(
+                        """
+                        INSERT INTO jogadas (nome_jogada, mapa, lado, tipo_round, markers, desenhos, desenhos_livres)
+                        VALUES (:nome, :mapa, :lado, :tipo_round, :markers::jsonb, :desenhos::jsonb, :desenhos_livres::jsonb)
+                        """,
+                        {
+                            "nome": nome_jogada,
+                            "mapa": mapa_selecionado,
+                            "lado": lado,
+                            "tipo_round": tipo_round,
+                            "markers": json.dumps(st.session_state.markers),
+                            "desenhos": json.dumps(st.session_state.desenhos),
+                            "desenhos_livres": json.dumps(st.session_state.get("desenhos_livres", [])),
+                        }
+                    )
+                    s.commit()
+                st.success(f"✅ Jogada '{nome_jogada}' salva com sucesso no banco de dados da equipe!")
+            except Exception as ex:
+                st.error(f"Erro ao salvar no banco de dados: {ex}")
 
 # ============================================================================
-# MINHAS JOGADAS — organizado por mapa, e dentro de cada mapa por tipo de round
+# MINHAS JOGADAS — VIA BANCO SQL (SUPABASE)
 # ============================================================================
 with abas[1]:
-    st.subheader("📁 Táticas prontas")
+    st.subheader("📁 Táticas da Equipe (Nuvem / Supabase)")
 
-    mapas_com_jogadas = sorted(
-        d.name for d in JOGADAS_DIR.iterdir() if d.is_dir() and any(d.rglob("*.json"))
-    ) if JOGADAS_DIR.exists() else []
-
-    if not mapas_com_jogadas:
-        st.info("Nenhuma jogada salva ainda.")
+    if conn is None:
+        st.warning("⚠️ Conexão com o banco de dados não configurada. Configure os Secrets no Streamlit Cloud.")
     else:
-        mapa_filtro = st.selectbox("Mapa", mapas_com_jogadas, key="filtro_mapa_jogadas")
-        pasta_mapa = JOGADAS_DIR / mapa_filtro
+        try:
+            df_jogadas = conn.query("SELECT * FROM jogadas ORDER BY criado_em DESC;", ttl=0)
+            
+            if df_jogadas.empty:
+                st.info("Nenhuma jogada salva na nuvem ainda.")
+            else:
+                mapas_no_banco = sorted(df_jogadas["mapa"].unique().tolist())
+                mapa_filtro = st.selectbox("Filtrar por Mapa", mapas_no_banco, key="filtro_mapa_jogadas")
+                
+                df_filtrado = df_jogadas[df_jogadas["mapa"] == mapa_filtro]
 
-        tabs_tipo = st.tabs(ROUND_TYPES)
-        for tab, tipo in zip(tabs_tipo, ROUND_TYPES):
-            with tab:
-                pasta_tipo = pasta_mapa / ROUND_TYPE_SLUGS[tipo]
-                jsons = sorted(pasta_tipo.glob("*.json")) if pasta_tipo.exists() else []
-
-                if not jsons:
-                    st.info(f"Nenhuma jogada '{tipo}' salva pra esse mapa ainda.")
-                for arq_json in jsons:
-                    dados_preview = json.loads(arq_json.read_text(encoding="utf-8"))
-                    lado_badge = dados_preview.get("lado", "?")
-                    with st.expander(f"{arq_json.stem}  ·  lado {lado_badge}"):
-                        png_path = arq_json.with_suffix(".png")
-                        if png_path.exists():
-                            st.image(
-                                str(png_path),
-                                use_container_width=True,
-                            )
-                            with open(png_path, "rb") as arquivo_png:
-                                st.download_button(
-                                    "⬇️ Baixar PNG",
-                                    data=arquivo_png,
-                                    file_name=png_path.name,
-                                    mime="image/png",
-                                    key=f"download_png_{arq_json}",
-                                    use_container_width=True,
-                                )
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("🔄 Carregar pra editar", key=f"load_{arq_json}", use_container_width=True):
-                                dados = json.loads(arq_json.read_text(encoding="utf-8"))
-                                if dados["mapa"] in mapas_disponiveis:
-                                    st.session_state.markers = dados["markers"]
-                                    st.session_state.desenhos = dados.get("desenhos", [])
-                                    st.session_state.desenhos_livres = dados.get("desenhos_livres", [])
-                                    st.session_state.marcador_segurando = None
-                                    st.success(f"Carregado! Vá na aba Prancheta (mapa: {dados['mapa']}).")
-                                else:
-                                    st.error(f"O mapa '{dados['mapa']}' dessa jogada não está mais na pasta maps/.")
-                        with c2:
-                            if st.button("🗑️ Excluir", key=f"del_{arq_json}", use_container_width=True):
-                                arq_json.unlink(missing_ok=True)
-                                png_path.unlink(missing_ok=True)
-                                st.rerun()
+                tabs_tipo = st.tabs(ROUND_TYPES)
+                for tab, tipo in zip(tabs_tipo, ROUND_TYPES):
+                    with tab:
+                        df_tipo = df_filtrado[df_filtrado["tipo_round"] == tipo]
+                        
+                        if df_tipo.empty:
+                            st.info(f"Nenhuma jogada '{tipo}' salva para este mapa.")
+                        else:
+                            for idx, row in df_tipo.iterrows():
+                                jogada_id = row["id"]
+                                nome_j = row["nome_jogada"]
+                                lado_j = row["lado"]
+                                
+                                with st.expander(f"{nome_j}  ·  Lado {lado_j}  ·  ID: {jogada_id}"):
+                                    c1, c2 = st.columns(2)
+                                    with c1:
+                                        if st.button("🔄 Carregar pra editar", key=f"load_sql_{jogada_id}", use_container_width=True):
+                                            # Trata caso venha como string ou json direto do postgres
+                                            m_data = row["markers"]
+                                            d_data = row["desenhos"]
+                                            dl_data = row["desenhos_livres"]
+                                            
+                                            st.session_state.markers = json.loads(m_data) if isinstance(m_data, str) else m_data
+                                            st.session_state.desenhos = json.loads(d_data) if isinstance(d_data, str) else (d_data if d_data else [])
+                                            st.session_state.desenhos_livres = json.loads(dl_data) if isinstance(dl_data, str) else (dl_data if dl_data else [])
+                                            st.session_state.marcador_segurando = None
+                                            st.success("Jogada carregada! Vá para a aba Prancheta.")
+                                    with c2:
+                                        if st.button("🗑️ Excluir da nuvem", key=f"del_sql_{jogada_id}", use_container_width=True):
+                                            try:
+                                             with conn.session as s:
+                                                 s.execute("DELETE FROM jogadas WHERE id = :id", {"id": jogada_id})
+                                                 s.commit()
+                                             st.success("Jogada excluída com sucesso!")
+                                             st.rerun()
+                                            except Exception as exc:
+                                             st.error(f"Erro ao excluir: {exc}")
+        except Exception as e:
+            st.error(f"Erro ao consultar o banco de dados: {e}. Verifique se a tabela 'jogadas' foi criada corretamente.")
