@@ -64,7 +64,7 @@ components.html(
 # CONEXÃO COM O BANCO DE DADOS (SUPABASE / POSTGRES)
 # ============================================================================
 try:
-    conn = st.connection("postgres", type="sql")
+    conn = st.connection("postgres", type="sql", autocommit=True, pool_pre_ping=True, pool_recycle=300)
 except Exception:
     conn = None
 
