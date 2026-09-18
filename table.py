@@ -481,7 +481,7 @@ with abas[0]:
                     s.execute(
                         text("""
                         INSERT INTO jogadas (nome_jogada, mapa, lado, tipo_round, markers, desenhos, desenhos_livres)
-                        VALUES (:nome, :mapa, :lado, :tipo_round, :markers::jsonb, :desenhos::jsonb, :desenhos_livres::jsonb)
+                        VALUES (:nome, :mapa, :lado, :tipo_round, CAST(:markers AS jsonb), CAST(:desenhos AS jsonb), CAST(:desenhos_livres AS jsonb))
                         """),
                         {
                             "nome": nome_jogada,
